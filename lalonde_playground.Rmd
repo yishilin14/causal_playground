@@ -25,7 +25,7 @@ kable(head(lalonde))
 
 ## 原始数据
 
-直接看数据，显得 treat (就业培训) 反而对 re78 (收入) 产生了副作用。平均来看，treat导致re78下降635美刀。
+直接看数据，显得treat(就业培训)反而对re78(收入)产生了副作用。平均来看，treat导致re78下降635美刀。
 
 ```{r original_data}
 # summary
@@ -38,12 +38,13 @@ t.test(lalonde$re78[lalonde$treat==1],lalonde$re78[lalonde$treat==0],paired=FALS
 ## MatchIt
 
 用MatchIt这个包来完成一些“配平”工作。部分代码来源于
+
 - 文档：https://cran.r-project.org/web/packages/MatchIt/MatchIt.pdf
 - Demo：https://github.com/kosukeimai/MatchIt/tree/master/demo
 
 ### Default
 
-使用MatchIt的默认参数进行配平。可以看到配平后一部分对照组的样本被去掉了。之前在Coursera上看A Crash Course in Causality的时候，prof说SMD<0.1认为可以接受，SMD在[0.1,0.3]之间就要很谨慎了。而这里black和hispan配平后的SMD都远远超过了0.3。
+使用MatchIt的默认参数进行配平。可以看到配平后一部分对照组的样本被去掉了。之前在Coursera上看“A Crash Course in Causality”的时候，prof说SMD<0.1认为可以接受，SMD在[0.1,0.3]之间就要很谨慎了。而这里black和hispan配平后的SMD都远远超过了0.3。
 
 ```{r matchit_default}
 
@@ -80,6 +81,7 @@ m.data <- match.data(m.out)
 ### IPW (glm)
 
 部分参考：
+
 - http://freerangestats.info/blog/2017/04/09/propensity-v-regression
 
 基础inverse propensity weighting (IPW)，过滤propensity score很小和很大的样本。
@@ -150,8 +152,7 @@ balance.check.col <- c("age", "educ", "black", "hispan", "nodegree", "re74", "re
 for (v in balance.check.col) {
   print(v)
   fml <- paste0(v, "~treat")
-  # print(summary(glm(fml, data=lalonde.copy, weights=pscore)))
-  print(coef(summary(glm(fml, data=lalonde.copy, weights=pscore)))[2,])
+  print(summary(glm(fml, data=lalonde.copy, weights=pscore)))
 }
 # regression with controls on propensity score screened data set
 print("Causal Effect:")
