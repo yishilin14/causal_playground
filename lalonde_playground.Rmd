@@ -1,0 +1,159 @@
+---
+title: "The Lalonde Dataset Playground"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(data.table)
+library(MatchIt)
+library(knitr)
+library(Zelig)
+```
+
+这个文档的目的是收集和尝试各种经典、基础的因果推断方式，感受一下不同方法的差异。 数据集使用了Lalonde，感觉各种入门的tutorial都在用这个数据集。
+
+## Load the dataset
+
+首先读一下lalonde数据集。
+
+```{r load}
+data(lalonde, package="MatchIt")
+lalonde <- as.data.table(lalonde)
+kable(head(lalonde))
+```
+
+## 原始数据
+
+直接看数据，显得 treat (就业培训) 反而对 re78 (收入) 产生了副作用。平均来看，treat导致re78下降635美刀。
+
+```{r original_data}
+# summary
+summary(lm(re78~treat, data=lalonde))
+
+# t-test
+t.test(lalonde$re78[lalonde$treat==1],lalonde$re78[lalonde$treat==0],paired=FALSE)
+```
+
+## MatchIt
+
+用MatchIt这个包来完成一些“配平”工作。部分代码来源于
+- 文档：https://cran.r-project.org/web/packages/MatchIt/MatchIt.pdf
+- Demo：https://github.com/kosukeimai/MatchIt/tree/master/demo
+
+### Default
+
+使用MatchIt的默认参数进行配平。可以看到配平后一部分对照组的样本被去掉了。之前在Coursera上看A Crash Course in Causality的时候，prof说SMD<0.1认为可以接受，SMD在[0.1,0.3]之间就要很谨慎了。而这里black和hispan配平后的SMD都远远超过了0.3。
+
+```{r matchit_default}
+
+## propensity score matching
+m.out <- matchit(treat ~ age + educ + black + hispan + nodegree + married + re74 + re75, method = "nearest", data = lalonde)
+
+## check balance
+summary(m.out, standardize = T)
+```
+
+```{r}
+## Simple comparison
+m.data <- match.data(m.out,distance ="pscore")
+t.test(m.data$re78[m.data$treat==1],m.data$re78[m.data$treat==0],paired=TRUE)
+```
+
+```{r}
+## Causal effect
+print("Causal Effect:")
+result <- glm(re78 ~ age + treat + educ + black + hispan + nodegree + married + re74 + re75, data = m.data)
+print(summary(result))
+print(coef(result)["treat"])
+```
+
+### Subclassification
+
+```{r}
+m.out <- matchit(treat ~ age + educ + black + hispan + nodegree + married + re74 + re75, data = lalonde, method = "subclass", subclass = 4)
+m.data <- match.data(m.out)
+```
+
+## 手写
+
+### IPW (glm)
+
+部分参考：
+- http://freerangestats.info/blog/2017/04/09/propensity-v-regression
+
+基础inverse propensity weighting (IPW)，过滤propensity score很小和很大的样本。
+
+```{r}
+lalonde.copy <- lalonde
+# propensity score
+ps.model <- glm(treat ~ age + educ + black + hispan + nodegree + married + re74 + re75, data=lalonde.copy, family=binomial())
+lalonde.copy[, pscore := predict(ps.model, newdata = lalonde.copy, type = "response")]
+lalonde.copy <- lalonde.copy[pscore >= .1 & pscore <=.9,]
+```
+
+检查平衡。为了不让输出太刷屏，注释掉了几个。
+
+```{r}
+# balance analysis
+# balance.check.col <- c("age", "educ", "black", "hispan", "nodegree", "re74", "re75")
+balance.check.col <- c("re74", "re75")
+for (v in balance.check.col) {
+  print(v)
+  fml <- paste0(v, "~treat")
+  print(summary(glm(fml, data=lalonde.copy, weights=pscore)))
+}
+```
+
+最基础的加权求causal effect。
+
+```{r}
+# causal effect
+print("Causal Effect:")
+lalonde.copy[, estimated_y1 := re78 * treat / pscore]
+lalonde.copy[, estimated_y0 := re78 * (1-treat) / (1-pscore)]
+print(summary(lalonde.copy[, estimated_y1-estimated_y0]))
+```
+
+用回归求causal effect。
+
+```{r}
+# regression with controls on propensity score screened data set
+print("Causal Effect:")
+print(summary(glm(re78 ~ treat + age + educ + black + hispan + nodegree + married + re74 + re75, data = lalonde.copy, weights = pscore)))
+```
+
+### IPW (Xgboost求propensity score)
+
+只是想试一试用XGBoost求PS的效果而已…… 感觉太多参数要调，容易难以抉择。不同参数的balance可能都ok，但是ATE差很多，甚至可能符号都不一样。
+
+```{r}
+library(xgboost)
+xgb <- xgboost(data = data.matrix(lalonde[, 2:9]),
+               label = lalonde$treat,
+               eta = 0.3,
+               max_depth = 5,
+               nround = 50,
+               subsample = 1,
+               colsample_bytree = 1,
+               seed = 1,
+               objective = "binary:logistic",
+               verbose = 0)
+y_pred <- predict(xgb, data.matrix(lalonde[,2:9]))
+# propensity score
+lalonde.copy <- lalonde
+lalonde.copy[, pscore := y_pred]
+lalonde.copy <- lalonde.copy[pscore >= .1 & pscore <=.9,]
+
+# balance analysis
+balance.check.col <- c("age", "educ", "black", "hispan", "nodegree", "re74", "re75")
+for (v in balance.check.col) {
+  print(v)
+  fml <- paste0(v, "~treat")
+  # print(summary(glm(fml, data=lalonde.copy, weights=pscore)))
+  print(coef(summary(glm(fml, data=lalonde.copy, weights=pscore)))[2,])
+}
+# regression with controls on propensity score screened data set
+print("Causal Effect:")
+print(summary(glm(re78 ~ treat + age + educ + black + hispan + nodegree + married + re74 + re75, data = lalonde.copy, weights = pscore)))
+```
