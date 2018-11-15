@@ -13,6 +13,8 @@ library(Zelig)
 
 这个文档的目的是收集和尝试各种经典、基础的因果推断方式，感受一下不同方法的差异。 数据集使用了Lalonde，感觉各种入门的tutorial都在用这个数据集。
 
+博客的md用`render("./lalonde_playground.Rmd", md_document(variant = "markdown_github"))`生成~
+
 ## Load the dataset
 
 首先读一下lalonde数据集。
@@ -28,10 +30,10 @@ kable(head(lalonde))
 直接看数据，显得treat(就业培训)反而对re78(收入)产生了副作用。平均来看，treat导致re78下降635美刀。
 
 ```{r original_data}
-# summary
+# Summary
 summary(lm(re78~treat, data=lalonde))
 
-# t-test
+# Simple comparison: t-test
 t.test(lalonde$re78[lalonde$treat==1],lalonde$re78[lalonde$treat==0],paired=FALSE)
 ```
 
@@ -39,41 +41,137 @@ t.test(lalonde$re78[lalonde$treat==1],lalonde$re78[lalonde$treat==0],paired=FALS
 
 用MatchIt这个包来完成一些“配平”工作。部分代码来源于
 
-- 文档：https://cran.r-project.org/web/packages/MatchIt/MatchIt.pdf
-- Demo：https://github.com/kosukeimai/MatchIt/tree/master/demo
+- MatchIt的文档：https://r.iq.harvard.edu/docs/matchit/2.4-20/matchit.pdf
+- MatchIt的Demo：https://github.com/kosukeimai/MatchIt/tree/master/demo
+- http://www.stephenpettigrew.com/teaching/gov2001/section11_2014.pdf
 
-### Default
+### Exact Matching
 
-使用MatchIt的默认参数进行配平。可以看到配平后一部分对照组的样本被去掉了。之前在Coursera上看“A Crash Course in Causality”的时候，prof说SMD<0.1认为可以接受，SMD在[0.1,0.3]之间就要很谨慎了。而这里black和hispan配平后的SMD都远远超过了0.3。
+> This technique matches each treated unit to all possible control units with exactly the same values on all the covariates, forming subclasses such that within each subclass all units (treatment and control) have the same covariate values.
 
-```{r matchit_default}
+其实我不知道MatchIt的文档是怎么挑covariates的，每个方法挑的都不太一样。EM的covariates尤其少，大概是因为全放进去配平完就只有十几个样本了吧。
 
-## propensity score matching
-m.out <- matchit(treat ~ age + educ + black + hispan + nodegree + married + re74 + re75, method = "nearest", data = lalonde)
-
-## check balance
-summary(m.out, standardize = T)
-```
-
-```{r}
-## Simple comparison
-m.data <- match.data(m.out,distance ="pscore")
-t.test(m.data$re78[m.data$treat==1],m.data$re78[m.data$treat==0],paired=TRUE)
-```
-
-```{r}
-## Causal effect
-print("Causal Effect:")
-result <- glm(re78 ~ age + treat + educ + black + hispan + nodegree + married + re74 + re75, data = m.data)
+```{r matchint_exact}
+m.out <- matchit(treat ~ educ + black + hispan, data = lalonde, method = "exact")
+summary(m.out, standarize=T)
+print("Causal Effect (ATE):")
+m.data <- match.data(m.out)
+result <- glm(re78 ~ treat + black + hispan + educ, data = m.data, weights = m.data$weights)
 print(summary(result))
-print(coef(result)["treat"])
+print("Causal Effect (ATE):")
+zelig(re78 ~ treat + black + hispan + educ, data = m.data, model = "ls", weights = "weights", cite=F)
+print("Causal Effect (ATE):")
+y.treat <- weighted.mean(m.data$re78[m.data$treat == 1], m.data$weights[m.data$treat == 1])
+y.cont <- weighted.mean(m.data$re78[m.data$treat == 0], m.data$weights[m.data$treat == 0])
+print(y.treat - y.cont)
 ```
 
 ### Subclassification
 
-```{r}
-m.out <- matchit(treat ~ age + educ + black + hispan + nodegree + married + re74 + re75, data = lalonde, method = "subclass", subclass = 4)
+> The goal of subclassification is to form subclasses, such that in each the distribution (rather than the exact values) of covariates for the treated and control groups are as similar as possible.
+
+算ATE的方法没有找到代码，不知道对不对。
+
+```{r matchit_subclassification}
+m.out <- matchit(treat ~ re74 + re75 + educ + black + hispan + age, data = lalonde, method = "subclass", subclass=6)
+summary(m.out, standarize=T)
+m.data<-match.data(m.out)
+ate.fml <- re78 ~ treat + re74 + re75 + educ + black + hispan + age
+
+print("Causal Effect (ATE):")
+tmp <- zelig(ate.fml, data = m.data, model = "ls", by = "subclass", cite=F)
+result <- aggregate(weights ~ subclass, data=m.data, sum)
+result$ate <- unlist(lapply(tmp$get_coef(), function(x){x["treat"]}))
+print(weighted.mean(result$ate, weights=result$weights))
+
+print("Causal Effect (ATE):")
+result <- aggregate(weights ~ subclass, data=m.data, sum)
+result$ate <- sapply(1:6, function(x){return(coef(glm(ate.fml, data = m.data[m.data$subclass==x, ]))["treat"])})
+print(weighted.mean(result$ate, weights=result$weights))
+```
+
+
+### Nearest Neighbor Matching
+
+> Matches are chosen for each treated unit one at a time, with the order specified by the m.order command (default=largest to smallest). At each matching step we choose the control unit that is not yet matched but is closest to the treated unit on the distance measure.
+
+使用MatchIt的默认参数进行配平。可以看到配平后一部分对照组的样本被去掉了。之前在Coursera上看“A Crash Course in Causality”的时候，prof说SMD<0.1认为可以接受，SMD在[0.1,0.3]之间就要很谨慎了。而这里black和hispan配平后的SMD都远远超过了0.3。
+
+
+```{r matchit_default}
+# Propensity score matching
+m.out <- matchit(treat ~ re74 + re75 + educ + black + hispan + age, data = lalonde, method = "nearest")
+
+# Check balance
+summary(m.out, standardize = T)
+
+# Simple comparison: non-parametric estimate of the ATT
+print("Causal Effect (ATT):")
+m.data <- match.data(m.out,distance ="pscore")
+t.test(m.data$re78[m.data$treat==1],m.data$re78[m.data$treat==0],paired=TRUE)
+
+# A model-based estimate of the ATT
+print("Causal Effect (ATE):")
+result <- glm(re78 ~ age + treat + educ + black + hispan + nodegree + married + re74 + re75, data = m.data)
+print(summary(result))
+```
+
+### Optimal 
+
+> In contrast, “optimal” matching finds the matched samples with the smallest average absolute distance across all the matched pairs.
+
+```{r matchit_optimal}
+m.out <- matchit(treat ~ re74 + re75 + age + educ, data = lalonde, method = "optimal", ratio = 2)
+summary(m.out, standardize = T)
+print("Causal Effect (ATE):")
 m.data <- match.data(m.out)
+result <- glm(re78 ~ age + treat + educ + black + hispan + nodegree + married + re74 + re75, data = m.data)
+print(summary(result))
+```
+
+### Full matching 
+
+> A fully matched sample is composed of matched sets, where each matched set contains one treated unit and one or more controls (or one control unit and one or more treated units).
+
+```{r matchit_full}
+m.out <- matchit(treat ~ age + educ + black + hispan + married + nodegree + re74 + re75, data = lalonde, method = "full")
+summary(m.out, standardize=T)
+m.data<-match.data(m.out)
+ate.fml <- re78 ~ treat + age + educ + black + hispan + married + nodegree + re74 + re75
+
+print("Causal Effect (ATE):")
+result <- glm(ate.fml, data = m.data, weights = m.data$weights)
+print(summary(result))
+print("Causal Effect (ATE):")
+zelig(re78 ~ treat + black + hispan + educ, data = m.data, model = "ls", weights = "weights", cite=F)
+print("Causal Effect (ATE):")
+y.treat <- weighted.mean(m.data$re78[m.data$treat == 1], m.data$weights[m.data$treat == 1])
+y.cont <- weighted.mean(m.data$re78[m.data$treat == 0], m.data$weights[m.data$treat == 0])
+print(y.treat - y.cont)
+```
+
+### Genetic Matching 
+
+> Genetic matching automates the process of finding a good matching solution (Diamond and Sekhon 2005). The idea is to use a genetic search algorithm to find a set of weights for each covariate such that the a version of optimal balance is achieved after matching.
+
+Match的过程太多输出，忽略。
+
+```{r matchit_genetic1, message=F}
+m.out <- matchit(treat ~ age + educ + black + hispan + married + nodegree + re74 + re75, data = lalonde, method = "genetic")
+```
+                 
+```{r matchit_genetic}
+#m.out <- matchit(treat ~ age + educ + black + hispan + married + nodegree + re74 + re75, data = lalonde, method = "genetic")
+print("Causal Effect (ATE):")
+result <- glm(ate.fml, data = m.data, weights = m.data$weights)
+print(summary(result))
+print("Causal Effect (ATE):")
+zelig(re78 ~ treat + black + hispan + educ, data = m.data, model = "ls", weights = "weights", cite=F)
+print("Causal Effect (ATE):")
+y.treat <- weighted.mean(m.data$re78[m.data$treat == 1], m.data$weights[m.data$treat == 1])
+y.cont <- weighted.mean(m.data$re78[m.data$treat == 0], m.data$weights[m.data$treat == 0])
+print(y.treat - y.cont)
+
 ```
 
 ## 手写
@@ -87,9 +185,10 @@ m.data <- match.data(m.out)
 基础inverse propensity weighting (IPW)，过滤propensity score很小和很大的样本。
 
 ```{r}
-lalonde.copy <- lalonde
+lalonde.copy <- as.data.table(lalonde)
 # propensity score
-ps.model <- glm(treat ~ age + educ + black + hispan + nodegree + married + re74 + re75, data=lalonde.copy, family=binomial())
+ps.model <- glm(treat ~ age + educ + black + hispan + nodegree + married + re74 + re75,
+                data=lalonde.copy, family=binomial())
 lalonde.copy[, pscore := predict(ps.model, newdata = lalonde.copy, type = "response")]
 lalonde.copy <- lalonde.copy[pscore >= .1 & pscore <=.9,]
 ```
@@ -109,11 +208,18 @@ for (v in balance.check.col) {
 
 最基础的加权求causal effect。
 
+http://www.stephenpettigrew.com/teaching/gov2001/section11_2014.pdf (p17)
+
 ```{r}
 # causal effect
-print("Causal Effect:")
+print("Causal Effect (ATE):")
 lalonde.copy[, estimated_y1 := re78 * treat / pscore]
 lalonde.copy[, estimated_y0 := re78 * (1-treat) / (1-pscore)]
+print(summary(lalonde.copy[, estimated_y1-estimated_y0]))
+
+print("Causal Effect (ATT):")
+lalonde.copy[, estimated_y1 := re78 * treat]
+lalonde.copy[, estimated_y0 := re78 * (1-treat) *pscore / (1-pscore)]
 print(summary(lalonde.copy[, estimated_y1-estimated_y0]))
 ```
 
@@ -121,7 +227,7 @@ print(summary(lalonde.copy[, estimated_y1-estimated_y0]))
 
 ```{r}
 # regression with controls on propensity score screened data set
-print("Causal Effect:")
+print("Causal Effect (ATE):")
 print(summary(glm(re78 ~ treat + age + educ + black + hispan + nodegree + married + re74 + re75, data = lalonde.copy, weights = pscore)))
 ```
 
