@@ -4,4 +4,4 @@
 .Ruserdata
 *.md
 *.html
-
+.DS_store
