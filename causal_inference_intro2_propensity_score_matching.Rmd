@@ -1,0 +1,108 @@
+---
+title: "Causal Inference Introduction2: Propensity Score Matching"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(data.table)
+library(weights)
+library(MatchIt)
+library(knitr)
+```
+
+## Load the dataset
+
+Datasets
+
+- Paper: Dehejia R H, Wahba S. Causal effects in nonexperimental studies: Reevaluating the evaluation of training programs[J]. Journal of the American statistical Association, 1999, 94(448): 1053-1062. (http://www.uh.edu/~adkugler/Dehejia&Wahba_JASA.pdf)
+- Download: http://users.nber.org/~rdehejia/data/nswdata2.html
+
+
+```{r load}
+# Load the datsets
+col.names=c('treat', 'age', 'educ', 'black', 'hispan', 'married', 'nodegree', 're74', 're75', 're78')
+dir <- './dataset/nswdata/'
+nsw_treated <- fread(paste0(dir, 'nswre74_treated.txt'), col.names = col.names)
+nsw_control <- fread(paste0(dir, 'nswre74_control.txt'), col.names = col.names)
+cps1_control <- fread(paste0(dir, 'cps3_controls.txt'), col.names = col.names)
+cps3_control <- fread(paste0(dir, 'cps3_controls.txt'), col.names = col.names)
+
+# Combine all the datasets
+nsw_data_exp <- rbind(nsw_treated, nsw_control)
+nsw_data_exp[, dataset := 'NSW-Data-Exp']
+nsw_data_obs <- rbind(nsw_treated, cps3_control)
+nsw_data_obs[, dataset := 'NSW-Data-Obs']
+data <- rbind(nsw_data_exp, nsw_data_obs)
+```
+
+Check the sample mean.
+
+```{r pre_treatment}
+get.mean.se <- function(x) {
+  mean = round(mean(x), 2)
+  se = round(sd(x)/sqrt(length(x)), 2)
+  return(paste0(mean, '(', se, ')'))
+}
+results <-  merge(
+  data[, .(`no. obs`=.N), by = .(dataset, treat)],
+  data[, lapply(.SD, get.mean.se), by = .(dataset, treat)]
+)
+tmp <- t(results[, 2:ncol(results)])
+colnames(tmp) <- results$dataset
+kable(tmp)
+```
+
+Estimate the Average Treatment Effect on the Treated (ATT).
+
+```{r}
+t.test(nsw_data_exp[treat==1, re78], nsw_data_exp[treat==0, re78])
+```
+
+## Observational Study: Propensity Score Matching
+
+### Propensity score matching
+
+```{r load}
+set.seed(42)
+m.out <- matchit(data = nsw_data_obs,
+                 formula = treat ~ age + I(age^2) + I(age^3) + educ + 
+                   black + hispan + married +
+                   I(re74/1000) + I(re75/1000),
+                 method = "nearest",
+                 distance = "logit",
+                 replace = FALSE,
+                 caliper = 0.05)
+```
+
+### Access Balance
+
+```{r}
+plot(m.out, type = "hist", interactive = F)
+plot(m.out, type = "QQ", interactive = F, which.xs = c("age", "I(re74/1000)", "I(re75/1000)"))
+summary(m.out, standardize = T)$sum.matched
+```
+
+### Causal Effect Estimation
+
+```{r}
+m.data <- match.data(m.out)
+
+# Direct compare
+res <- wtd.t.test(m.data$re78[m.data$treat == 1],
+                  m.data$re78[m.data$treat == 0],
+                  weight = m.data$weights[m.data$treat == 1],
+                  weighty = m.data$weights[m.data$treat == 0])
+print(res)
+mu <- res$additional[1]
+std <- res$additional[4]
+cat("Confidence interval: ", sapply(qt(c(0.025, 0.975), coef(res)["df"]), function(x){return(mu+x*std)}), "\n")
+
+# Fit
+att.fml <- re78 ~ treat + age + educ + black + hispan + married + nodegree + re74 + re75
+fit <- lm(att.fml, data = m.data, weights = m.data$weights)
+summary(fit)
+cat("Confidence interval: ", confint(fit, "treat", 0.95), "\n")
+```
+
+
