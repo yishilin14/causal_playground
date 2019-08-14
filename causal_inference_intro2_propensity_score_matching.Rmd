@@ -16,7 +16,7 @@ library(knitr)
 Datasets
 
 - Paper: Dehejia R H, Wahba S. Causal effects in nonexperimental studies: Reevaluating the evaluation of training programs[J]. Journal of the American statistical Association, 1999, 94(448): 1053-1062. (http://www.uh.edu/~adkugler/Dehejia&Wahba_JASA.pdf)
-- Download: http://users.nber.org/~rdehejia/data/nswdata2.html
+- Download: http://users.nber.org/~rdehejia/nswdata2.html
 
 
 ```{r load}
