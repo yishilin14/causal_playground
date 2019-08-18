@@ -1,0 +1,170 @@
+---
+title: 'The NSW Data Playground: Regression'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(data.table)
+library(weights)
+library(knitr)
+library(cobalt)
+library(WeightIt)
+library(survey)
+```
+
+## 读数据
+
+数据集
+
+- Paper: Dehejia R H, Wahba S. Causal effects in nonexperimental studies: Reevaluating the evaluation of training programs[J]. Journal of the American statistical Association, 1999, 94(448): 1053-1062.
+- Download: http://users.nber.org/~rdehejia/nswdata2.html
+
+
+```{r load}
+# Load the datsets
+col.names=c('treat', 'age', 'educ', 'black', 'hispan', 'married', 'nodegree', 're74', 're75', 're78')
+dir <- './dataset/nswdata/'
+
+# Combine all the datasets
+nsw_data_exp <- rbind(
+  fread(paste0(dir, 'nswre74_treated.txt'), col.names = col.names),
+  fread(paste0(dir, 'nswre74_control.txt'), col.names = col.names)
+)
+nsw_data_obs <- rbind(
+  fread(paste0(dir, 'nswre74_treated.txt'), col.names = col.names),
+  fread(paste0(dir, 'cps3_controls.txt'), col.names = col.names)
+)
+
+treat.fml <- treat ~ age + educ + black + hispan + married + nodegree + re74 + re75
+```
+
+定义一个用来计算ATT的函数，之后会反复用到。
+
+```{r att_func}
+estimate.causal.effect <- function(data.name, method.name, unbalance.cnt=0, data, weights) {
+  d.w <- svydesign(ids = ~1, weights = weights, data = data)
+  fit <- svyglm(re78 ~ treat, design = d.w)
+  att <- round(coef(fit)["treat"])
+  conf <- paste0("(", paste0(round(confint(fit, "treat", 0.95)), collapse = ", "), ")")
+  tbl <- data.table(
+    `Data name` = data.name,
+    `Method name` = method.name,
+    `# Unbalance Var.` = unbalance.cnt,
+    `ATT` = att,
+    `95% Conf. Int.` = conf
+    )
+  return(tbl)
+}
+```
+
+首先，先看看实验数据的两组用户是否同质。比较诡异的是，实验组和对照组的年龄（age）和受教育程度（educ和nodegree）并不是很接近。两组用户比较之后，ATT为1794美金，下文把这个当作ATT的真值。
+
+```{r experimental_data}
+t1 <- bal.tab(treat.fml, data = nsw_data_exp, estimand = "ATT", m.threshold = .1)$Balance
+kable(t1[, c("Type", "M.0.Un", "M.1.Un","Diff.Un", "M.Threshold.Un")])
+t2 <- estimate.causal.effect("Experimental", "Ground Truth", 3, nsw_data_exp, rep(1, nrow(nsw_data_exp)))
+causal.effect.results.all <- t2
+kable(t2)
+```
+
+接下来看看非实验数据的情况，两组用户的差异很大，不能直接比较。
+
+```{r observational_data}
+t1 <- bal.tab(treat.fml, data = nsw_data_obs, estimand = "ATT", m.threshold = .1)$Balance
+kable(t1[, c("Type", "M.0.Un", "M.1.Un","Diff.Un", "M.Threshold.Un")])
+unbalance.cnt <- sum(t1$M.Threshold.Un=="Not Balanced, >0.1")
+t2 <- estimate.causal.effect("Observational", "Do nothing", unbalance.cnt,
+                             nsw_data_obs, rep(1, nrow(nsw_data_obs)))
+causal.effect.results.all <- rbind(causal.effect.results.all, t2)
+kable(t2)
+```
+
+## 因果推断
+这一部分，我们用`WeightIt`这个包来尝试一下不同的加权方法。
+
+### WeightIt-PS
+第一个方法是普通的 inverse propensity score weighting。年龄这个属性并不能调整得非常 balance，其它都还好。推断出的ATT为1214美金。
+
+```{r ps}
+W.out <- weightit(treat.fml, data = nsw_data_obs, estimand = "ATT", method = "ps")
+t1 <- bal.tab(W.out, m.threshold = .1)$Balance
+kable(t1[, c("Type", "M.0.Adj", "M.1.Adj","Diff.Adj", "M.Threshold")])
+unbalance.cnt <- sum(t1$M.Threshold=="Not Balanced, >0.1")
+t2 <- estimate.causal.effect("Observational", "PS", unbalance.cnt, nsw_data_obs, get.w(W.out))
+causal.effect.results.all <- rbind(causal.effect.results.all, t2)
+kable(t2)
+```
+
+### WeightIt-GBM
+第二个方法是`gbm`，有两个属性不很balance，推断出的ATT也和真值差得十万八千里。个人猜测是这个数据集的数据量太小了，`gbm`发挥不出威力，又或者是默认的参数导致了过拟合/欠拟合，这里就不深究了。
+
+```{r gbm}
+W.out <- weightit(treat.fml, data = nsw_data_obs, estimand = "ATT", method = "gbm")
+t1 <- bal.tab(W.out, m.threshold = .1)$Balance
+kable(t1[, c("Type", "M.0.Adj", "M.1.Adj","Diff.Adj", "M.Threshold")])
+unbalance.cnt <- sum(t1$M.Threshold=="Not Balanced, >0.1")
+t2 <- estimate.causal.effect("Observational", "GBM", unbalance.cnt, nsw_data_obs, get.w(W.out))
+causal.effect.results.all <- rbind(causal.effect.results.all, t2)
+kable(t2)
+```
+
+### WeightIt-CBPS
+使用`CBPS`的时候，所有属性都配平了，ATT也挺好。
+
+```{r cbps}
+W.out <- weightit(treat.fml, data = nsw_data_obs, estimand = "ATT", method = "cbps")
+t1 <- bal.tab(W.out, m.threshold = .1)$Balance
+kable(t1[, c("Type", "M.0.Adj", "M.1.Adj","Diff.Adj", "M.Threshold")])
+unbalance.cnt <- sum(t1$M.Threshold=="Not Balanced, >0.1")
+t2 <- estimate.causal.effect("Observational", "CBPS", unbalance.cnt, nsw_data_obs, get.w(W.out))
+causal.effect.results.all <- rbind(causal.effect.results.all, t2)
+kable(t2)
+```
+
+### WeightIt-EBAL
+使用`EBAL`的时候，所有属性都配平了，而且配平程度令人难以置信！ATT也挺好。
+
+```{r ebal}
+W.out <- weightit(treat.fml, data = nsw_data_obs, estimand = "ATT", method = "ebal")
+t1 <- bal.tab(W.out, m.threshold = .1)$Balance
+kable(t1[, c("Type", "M.0.Adj", "M.1.Adj","Diff.Adj", "M.Threshold")])
+unbalance.cnt <- sum(t1$M.Threshold=="Not Balanced, >0.1")
+t2 <- estimate.causal.effect("Observational", "EBAL", unbalance.cnt, nsw_data_obs, get.w(W.out))
+causal.effect.results.all <- rbind(causal.effect.results.all, t2)
+kable(t2)
+```
+
+### WeightIt-EBCW
+使用`EBCW`的时候，所有属性都配平了，而且配平程度令人难以置信！ATT也挺好。
+
+```{r ebcw}
+W.out <- weightit(treat.fml, data = nsw_data_obs, estimand = "ATT", method = "ebcw")
+t1 <- bal.tab(W.out, m.threshold = .1)$Balance
+kable(t1[, c("Type", "M.0.Adj", "M.1.Adj","Diff.Adj", "M.Threshold")])
+unbalance.cnt <- sum(t1$M.Threshold=="Not Balanced, >0.1")
+t2 <- estimate.causal.effect("Observational", "EBCW", unbalance.cnt, nsw_data_obs, get.w(W.out))
+causal.effect.results.all <- rbind(causal.effect.results.all, t2)
+kable(t2)
+```
+
+### WeightIt-OptWeight
+使用`optweight`的时候，所有属性都配平了，配平程度也是完美的。ATT也挺好。
+
+```{r optweight}
+W.out <- weightit(treat.fml, data = nsw_data_obs, estimand = "ATT", method = "optweight")
+t1 <- bal.tab(W.out, m.threshold = .1)$Balance
+kable(t1[, c("Type", "M.0.Adj", "M.1.Adj","Diff.Adj", "M.Threshold")])
+unbalance.cnt <- sum(t1$M.Threshold=="Not Balanced, >0.1")
+t2 <- estimate.causal.effect("Observational", "OptWeight", unbalance.cnt, nsw_data_obs, get.w(W.out))
+causal.effect.results.all <- rbind(causal.effect.results.all, t2)
+kable(t2)
+```
+
+### 汇总结果
+汇总一下结果，结束～
+
+```{r}
+kable(causal.effect.results.all)
+```
+
